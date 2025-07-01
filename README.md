@@ -1,0 +1,1 @@
+# Eshop Django Project 

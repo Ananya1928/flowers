@@ -1,91 +1,58 @@
-"""
-distutils.command.install_egg_info
-
-Implements the Distutils 'install_egg_info' command, for installing
-a package's PKG-INFO metadata.
-"""
-
 import os
-import re
-import sys
-from typing import ClassVar
 
-from .. import dir_util
-from .._log import log
-from ..cmd import Command
+from setuptools import Command, namespaces
+from setuptools.archive_util import unpack_archive
+
+from .._path import ensure_directory
+
+from distutils import dir_util, log
 
 
-class install_egg_info(Command):
-    """Install an .egg-info file for the package"""
+class install_egg_info(namespaces.Installer, Command):
+    """Install an .egg-info directory for the package"""
 
-    description = "Install package's PKG-INFO metadata as an .egg-info file"
-    user_options: ClassVar[list[tuple[str, str, str]]] = [
+    description = "Install an .egg-info directory for the package"
+
+    user_options = [
         ('install-dir=', 'd', "directory to install to"),
     ]
 
     def initialize_options(self):
         self.install_dir = None
 
-    @property
-    def basename(self):
-        """
-        Allow basename to be overridden by child class.
-        Ref pypa/distutils#2.
-        """
-        name = to_filename(safe_name(self.distribution.get_name()))
-        version = to_filename(safe_version(self.distribution.get_version()))
-        return f"{name}-{version}-py{sys.version_info.major}.{sys.version_info.minor}.egg-info"
-
-    def finalize_options(self):
+    def finalize_options(self) -> None:
         self.set_undefined_options('install_lib', ('install_dir', 'install_dir'))
-        self.target = os.path.join(self.install_dir, self.basename)
-        self.outputs = [self.target]
+        ei_cmd = self.get_finalized_command("egg_info")
+        basename = f"{ei_cmd._get_egg_basename()}.egg-info"
+        self.source = ei_cmd.egg_info
+        self.target = os.path.join(self.install_dir, basename)
+        self.outputs: list[str] = []
 
-    def run(self):
-        target = self.target
-        if os.path.isdir(target) and not os.path.islink(target):
-            dir_util.remove_tree(target, dry_run=self.dry_run)
-        elif os.path.exists(target):
-            self.execute(os.unlink, (self.target,), "Removing " + target)
-        elif not os.path.isdir(self.install_dir):
-            self.execute(
-                os.makedirs, (self.install_dir,), "Creating " + self.install_dir
-            )
-        log.info("Writing %s", target)
+    def run(self) -> None:
+        self.run_command('egg_info')
+        if os.path.isdir(self.target) and not os.path.islink(self.target):
+            dir_util.remove_tree(self.target, dry_run=self.dry_run)
+        elif os.path.exists(self.target):
+            self.execute(os.unlink, (self.target,), "Removing " + self.target)
         if not self.dry_run:
-            with open(target, 'w', encoding='UTF-8') as f:
-                self.distribution.metadata.write_pkg_file(f)
+            ensure_directory(self.target)
+        self.execute(self.copytree, (), f"Copying {self.source} to {self.target}")
+        self.install_namespaces()
 
     def get_outputs(self):
         return self.outputs
 
+    def copytree(self) -> None:
+        # Copy the .egg-info tree to site-packages
+        def skimmer(src, dst):
+            # filter out source-control directories; note that 'src' is always
+            # a '/'-separated path, regardless of platform.  'dst' is a
+            # platform-specific path.
+            for skip in '.svn/', 'CVS/':
+                if src.startswith(skip) or '/' + skip in src:
+                    return None
+            self.outputs.append(dst)
+            log.debug("Copying %s to %s", src, dst)
+            return dst
 
-# The following routines are taken from setuptools' pkg_resources module and
-# can be replaced by importing them from pkg_resources once it is included
-# in the stdlib.
-
-
-def safe_name(name):
-    """Convert an arbitrary string to a standard distribution name
-
-    Any runs of non-alphanumeric/. characters are replaced with a single '-'.
-    """
-    return re.sub('[^A-Za-z0-9.]+', '-', name)
-
-
-def safe_version(version):
-    """Convert an arbitrary string to a standard version string
-
-    Spaces become dots, and all other non-alphanumeric characters become
-    dashes, with runs of multiple dashes condensed to a single dash.
-    """
-    version = version.replace(' ', '.')
-    return re.sub('[^A-Za-z0-9.]+', '-', version)
-
-
-def to_filename(name):
-    """Convert a project or version name to its filename-escaped form
-
-    Any '-' characters are currently replaced with '_'.
-    """
-    return name.replace('-', '_')
+        unpack_archive(self.source, self.target, skimmer)
